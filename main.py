@@ -27,8 +27,9 @@ def sync_linear():
     linear_issue_id = match.group(0)
     api_key = os.environ.get('LINEAR_API_KEY', '')
 
-    mutation = """
-    mutation CreateAttachment($issueId: String!, $url: String!, $title: String!) {
+    if event == "pullrequest:created":
+        mutation = """
+        mutation CreateAttachment($issueId: String!, $url: String!, $title: String!) {
           attachmentCreate(input: {
             issueId: $issueId,
             url: $url,
@@ -38,13 +39,22 @@ def sync_linear():
             success
           }
         }
-    """
-    vars = {
-        "issueId": linear_issue_id,
-        "url": pr_url,
-        "title": f"Bitbucket PR: {pr_title}"
-    }
-
+        """
+        vars = {
+            "issueId": linear_issue_id,
+            "url": pr_url,
+            "title": f"Bitbucket PR: {pr_title}"
+        }
+    elif event == "pullrequest:fulfilled":
+        mutation = """
+        mutation UpdateStatus($id: String!) {
+          issueUpdate(id: $id, input: { stateId: "46746634-8c8e-4707-9179-1a663eb9ccbf" }) {
+            success
+          }
+        }
+        """
+        vars = {"id": linear_issue_id}
+    
     r = requests.post(
         "https://api.linear.app/graphql",
         headers={"Authorization": api_key},
@@ -56,7 +66,6 @@ def sync_linear():
         error = errors[0]
         content = { "message": error.get('message', '') }
         return content, r.status_code
-    
     return { "message": "Success" }, 200
 
 if __name__ == "__main__":
