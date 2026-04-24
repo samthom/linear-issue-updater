@@ -171,8 +171,9 @@ CAPTION: Branch structure
 We are basically updating the commit stored inside the branch information. This is possible because 
 
 *** Three way merge (recursive)
-Let's start working on the next feature. Start with creating a new branch for it. 
->Git is designed for you to create n number of branches. It is actually encouraged to create branches for new features and fixes.
+Let's start working on the next feature. Start with creating a new branch for it.
+
+> Git is designed for you to create n number of branches. It is actually encouraged to create branches for new features and fixes.
 
 ~git branch pr-linking~
 
@@ -180,9 +181,8 @@ Currently we are in /main/. And we have a working piece of software but we did n
 
 Now we have a new commit in /main/ branch which is not inside the new branch /pr-linking/
 
-Let's update the /pr-linking/ branch with new endpoint.
+Let's update the /pr-linking/ branch with new endpoint. So first checkout to the /pr-linking/ branch and add the following to /main.py/
 
-Add the following to /main.py/
 #+begin_src python
 from flask import Flask, request
 from dotenv import load_dotenv
@@ -198,7 +198,7 @@ app = Flask(__name__)
 def health_check():
     return '.'
 
-@app.route('/sync-linear', methods=['POST'])
+@app.route('/linear', methods=['POST'])
 def sync_linear():
     event = request.headers.get("x-event-key")
     payload = request.get_json()
@@ -250,3 +250,363 @@ if __name__ == "__main__":
 
 #+end_src
 
+Just before commiting all the changes.  Let's see if there is any tailing white spaces.
+
+> What is trailing white spaces ?
+> Git trailing whitespace refers to any spaces or tabs that appear after the last non-whitespace character on a line in a file tracked by Git. It is considered bad because it can lead to unnecessary changes in diffs, cause issues with line wrapping, and increase file size without adding any value to the code.
+
+You can check if there any white space by running ~git diff --check~. The ideal solutions is to setup some kidn git pre commit hook to check if there are white spaces.
+Fix the errors if any before adding and commiting the changes we've made.
+
+
+Now it is time to add tests. To make the whole process easy to track. Let's create a new branch for just adding tests.
+~git branch pr-linking-tests~
+
+Before moving to the new branch I made a mistake in the route name of the url. It is supposed to be ~linear-sync~ not just ~linear~. Let's make that change and update the
+branch with a commit.
+
+On to the new branch for adding tests ~git checkout pr-linking-tests~. Let's add the following to the test file.
+#+begin_src python
+import pytest
+from main import app
+from unittest.mock import patch
+import os
+
+api_key = "very_secret"
+os.environ["LINEAR_API_KEY"] = api_key
+
+@pytest.fixture
+def client():
+    with app.test_client() as client:
+        yield client
+
+def test_healthcheck(client):
+    response = client.get('/')
+    assert response.status_code == 200
+    assert response.data == b"."
+
+
+# test for checking the pr linking work flow
+@patch('main.requests.post')
+def test_sync_linear_pr_linking_success(mock_post, client):
+    linear_issue_id = "RND-118"
+    pr_title = f"{linear_issue_id} Title of the pull request"
+    pr_url = "https://api.bitbucket.org/pullrequest_id"
+    payload = {
+        "pullrequest": {
+            "title": pr_title,
+            "description": "Description of pull request",
+            "links": {
+                "html": {
+                    "href": pr_url
+                }
+            }
+        }
+    }
+
+    headers = {
+        "x-event-key": "pullrequest:created",
+    }
+    mock_post.return_value.status_code = 200
+    response = client.post('/sync-linear', json=payload, headers=headers)
+    assert response.status_code == 200
+
+    mutation = """
+    mutation CreateAttachment($issueId: String!, $url: String!, $title: String!) {
+         attachmentCreate(input: {
+           issueId: $issueId,
+           url: $url,
+           title: $title,
+           iconUrl: "https://bitbucket.org/favicon.ico"
+         }) {
+           success
+         }
+       }
+    """
+
+    vars = {
+        "issueId": linear_issue_id,
+        "url": pr_url,
+        "title": f"Bitbucket PR: {pr_title}"
+    }
+    mock_post.assert_called_once_with(
+        "https://api.linear.app/graphql",
+        headers={"Authorization": api_key},
+        json={"query": mutation, "variables": vars}
+    )
+
+def test_sync_linear_pr_linking_no_issue(client):
+    payload = {
+        "pullrequest": {
+            "title": "Title of pull request",
+            "description": "Description of pull request",
+            "links": {
+                "html": {
+                    "href": "https://api.bitbucket.org/pullrequest_id"
+                }
+            }
+        }
+    }
+
+    headers = {
+        "x-event-key": "pullrequest:created",
+    }
+    response = client.post('/sync-linear', json=payload, headers=headers)
+    assert response.status_code == 202
+
+#+end_src
+
+Okay now we have tests for the endpoint. Let's see if it works by running all the tests.
+~make run~
+
+Looks like I make a mistake for the url path to the request. It is supposed to be ~sync-linear~ not ~linear~ or ~linear-sync~. Let's make that change and see if the test passes.
+
+Okay. Now everything is good. Let's commit the two changes. For a change let's see how we can just add *hunks* instead of all changes inside a file.
+You can do this by running ~git add --patch~ which starts an interactive session where you can add(y), discard(n) and edit(e) the hunks. There is more that you can do here.
+
+Okay now we have that let's see commit our changes.
+
+While we are at it. Why don't we add the test case for the next use case. Status update to done inside linear. Let's add the test.
+#+begin_src python
+# test for issue update to done status inside linear
+@patch('main.requests.post')
+def test_sync_linear_pr_done_success(mock_post, client):
+    linear_issue_id = "RND-118"
+    pr_title = f"{linear_issue_id} Title of the pull request"
+    pr_url = "https://api.bitbucket.org/pullrequest_id"
+    payload = {
+        "pullrequest": {
+            "title": pr_title,
+            "description": "Description of pull request",
+            "links": {
+                "html": {
+                    "href": pr_url
+                }
+            }
+        }
+    }
+
+    headers = {
+        "x-event-key": "pullrequest:fulfilled",
+    }
+    mock_post.return_value.status_code = 200
+    response = client.post('/sync-linear', json=payload, headers=headers)
+    assert response.status_code == 200
+
+    mutation = """
+    mutation UpdateStatus($id: String!) {
+      issueUpdate(id: $id, input: { stateId: "46746634-8c8e-4707-9179-1a663eb9ccbf" }) {
+        success
+      }
+    }
+    """
+    vars = {"id": linear_issue_id}
+
+    mock_post.assert_called_once_with(
+        "https://api.linear.app/graphql",
+        headers={"Authorization": api_key},
+        json={"query": mutation, "variables": vars}
+    )
+
+#+end_src
+
+
+And let's confirm everything by running tests again.
+
+**** Git Stash
+Looks like this will break our pipeline if we commit now. What we can do in this situation is /stash/ it in to the stack.
+Use ~git stash push~ to push all the changes (staged and unstaged) to the stack.
+
+There couple of options that is useful
+> -m "<identifier>" - To give a name to the entry.
+> --keep-index - To stash only the unstaged changes.
+> --staged - To stash on the staged changes
+
+Once you stash the changes you can see it by running ~git stash list~ and you can see the actual code by running ~git stash show -p {identifier}~
+
+Okay so we have a clean work tree. Let's merge all this new changes to our source branch /pr-linking/. Checkout to that branch and run ~git merge pr-linking-tests~
+
+**** Merge Conflict
+Ahh! OMG!!
+
+Now we have a merge conflict. This is happening because we edited the same line twice with different branch. So git is having a hard time to decide which line to take.
+This might seem very daunting. But actually it is far simpler than you can imagine. Since we made a change to the /pr-linking/ branch after creating the /pr-linking-tests/
+this merge is not going to be a fast-forward merge. Because git needs to handle the commit we made on the source branch.
+
+The log says in which file the conflict is. You can also check if the conflict is fixed by running ~git status~.
+So if you open /main.py/ you will see the following.
+
+#+begin_src python
+<<<<<<< HEAD
+@app.route('/linear-sync', methods=['POST'])
+||||||| 06ff10c
+@app.route('/linear', methods=['POST'])
+=======
+@app.route('/sync-linear', methods=['POST'])
+>>>>>>> pr-linking-tests
+#+end_src
+
+
+So what is this ?
+We have three version of a line we changed here. The top one is the change in the current HEAD ie. /pr-linking/ branch and the bottom one is the change coming from
+merge source branch. ie /pr-linking-tests/.
+And the middle one is the base for both. Basically means that was the common point from where all this changes happened in each branch.
+
+So to fix this. Most of the code editors will have support. You can easily select one of the change or both.
+
+[demo]
+
+Or you can simply remove the ~<<<<<<HEAD ..........  >>>>>>pr-linking-tests~ to write the change you want.
+After you can add the file to stage and continue with merge by ~git commit~ or ~git commit --continue~. Where you will write the merge commit message and complete the merge.
+
+Now we are ready to merge all the changes to the main branch. Let's do that by checking out to the /main/ branch and running ~git merge pr-linking~.
+
+As you can see this time it is not a fast-forward merge hence we need a merge commit.
+
+* Git Tags
+Now I would like to introduce a new useful sub command.
+~git log --oneline --graph --all~
+
+Which gives you a nice view of all the things happened so far.
+
+Since we have a working prototype. Let's take a build. Let's use *git tag* create a snapshot of this version. The main difference between tags and branch is that
+branch will always evolve but tag is like snapshot of the current worktree. You can also make tags from commit also.
+Let's create version 0.1.0 from our simple http server commit and create a new tag from the current commit (Which include the first api).
+~git tag v0.1.0 <commit-hash-of-healthcheck> -m "tag message"~
+~git tag v0.2.0 -m "pr-linking"~
+And list the tags by ~git tags~
+
+Now if you want to go back to the first tag. You can easily checkout to the tag.
+~git checkout v0.1.0~
+
+
+* Git Rebase (For combining branches)
+This rebasing is very similar to the interactive rebasing we did earlier. So when you are rebasing git is basically applying all the commits from the source to the new base.
+One by one like we did in interactive rebasing. We will discuss the advantage once I am done with demo.
+
+So to demonstrate that, lets work on the next feature. The linear issue status to be udpated to done when a pull request is fulfilled. Let's create new a branch for that.
+~git branch pr-done~ (Please note that you can always create a new branch and checkout to that branch by ~git checkout -b <branch>~)
+
+Well I forgot to add this to the README.
+#+begin_src markdown
+You can run the tests with `make test`
+#+end_src
+
+And commit this changes. As you can see I am doing the same thing we did earlier. Intentionally creating a new commit which is not in the feature branch we just created.
+Now let's switch to the new branch and add the second feature to the /main.py/
+#+begin_src python
+if event == "pullrequest:created":
+    mutation = """
+    mutation CreateAttachment($issueId: String!, $url: String!, $title: String!) {
+         attachmentCreate(input: {
+           issueId: $issueId,
+           url: $url,
+           title: $title,
+           iconUrl: "https://bitbucket.org/favicon.ico"
+         }) {
+           success
+         }
+       }
+    """
+
+    vars = {
+        "issueId": linear_issue_id,
+        "url": pr_url,
+        "title": f"Bitbucket PR: {pr_title}"
+    }
+elif event == "pullrequest:fulfilled":
+    mutation = """
+    mutation UpdateStatus($id: String!) {
+      issueUpdate(id: $id, input: { stateId: "46746634-8c8e-4707-9179-1a663eb9ccbf" }) {
+        success
+      }
+    }
+    """
+    vars = {"id": linear_issue_id}
+#+end_src
+
+And see if the existing tests succeed.
+
+Now what pending is to write tests for the second senario. But wait!! We have all that stored somewhere. In our stash. Let's pop the stash by ~git stash pop~
+And now we have the second feature tests inside the test file. And the stash is empty.
+Now let's commit all this and prepare for merge to main branch.
+
+Now to bring all this changes to main. Let's take different strategy. Because if simply checkout to main and merge we are going to get a merge commit since there is a commit
+in main which is not in the /pr-done/ branch.
+
+So instead of that. Let's rebase all the changes happened in /pr-done/ branch  to our /main/ branch
+~git rebase main pr-done~  for switching to /pr-done/ branch and to rebase all commits to /main/ branch
+
+This is where it get's little tricky
+
+#+begin_src markdown
+The following  diagram shows the before structure our branches.
+
+A---B---C  main
+      \
+       D---E  pr-done
+
+Now when we rebase pr-done to main the following happens
+
+A---B---C  main
+             \
+             D'---E'  pr-done
+			 
+Now it maybe confusing. Because it looks like all the changes where applied to the feature branch. But if you go to the git pointer reference, you will know that each branch is
+basically pointing towards a commit. So as you can see that pr-done is pointing towards a new commit which include the commit missing from the main. 
+So all the changes happened in the feature branch is now on top of all the changes in the main. 
+
+#+end_src
+
+So now the last piece of puzzle is to make /main/ branch to point towards the latest commit ie. /E'/
+To do that we can now easily merge /pr-done/ to /main/ and it will be a fast-forward merge. Since /main/ branch is simply pointing towards a new commit.
+#+begin_src markdown
+A---B---C---D'---E'  main, feature
+
+After the merge it will look like this.
+#+end_src
+
+Now if you look the logs. You will not see a merge commit. Which is much more cleaner and keeps a linear git commit history.
+
+Questions ?
+
+Now what about *git pull --rebase* ?
+Well this is a common best practise you can do when you try to pull changes from remote. So imagine that you were working on a testing branch and you made some
+commits. Now you want to push those changes to origin. But some updated the /origin/testing/ with some update. If you simply do ~git pull~ you are going to do a merge commit.
+It is because you local contains some changes that is not there in the source.
+So if you do ~git pull --rebase~ instead it will fetch all the remote changes and run all your local changes on top of that. Which will avoid having a merge commit.
+One important thing to note is that similar to merge conflict you can get conflicts here as well. It is very less compared to merge. But you can do the same procedure to
+fix the conflict. Once you are done with the fixing you can add the changes and continue rebase by ~git rebase --continue~.
+
+
+
+* Git Cherry Pick
+This is very useful command when you have to just pick a single commit that you like or need from a different branch. Idea workflow would be when you
+have to pick hotfix commit from different branch and add it to the main for release.
+
+So to demonstrate that let's create a branch ~linear-updater-documentation~
+
+First let's add some random code comment to /main.py/
+#+begin_src python
+# Simple http server using flask
+from flask import Flask, request
+from dotenv import load_dotenv
+import requests
+import re
+......
+#+end_src
+
+Commit this change.
+Next let's copy paste the readme from the original repo you guys are referring and copy paste the assets dir for the images to work in the markdown.
+And Commit it.
+
+Now let's switch back to main. And cherry pick the second commit.
+~git switch main~
+~git cherry-pick <commit-hash>~
+
+Now check the work tree and logs.
+
+* Conclusion
+This was a demonstration of the subcommands. I did create scenarios for the sub commands to be used. Now you know how each sub command work. It is upto you to
+use it in you unique situation. The idea was to make you more comfortable and confident with git.
+There is more explore in git than this. But this should help you to do most of the advanced stuff. 
